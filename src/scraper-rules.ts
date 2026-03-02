@@ -14,7 +14,9 @@ export const scraperRules: GetMetadataOptions[] = [
       { selector: 'meta[name=title]', attribute: 'content' },
       { selector: 'meta[name="twitter:title"]', attribute: 'content' },
       { selector: 'meta[property="twitter:title"]', attribute: 'content' },
+      { selector: 'meta[itemprop="name"]', attribute: 'content' },
       { selector: 'title' },
+      { selector: 'h1.ytd-watch-metadata' },
       { selector: 'h1[slot="title"]' },
       { selector: '.post-title' },
       { selector: '.entry-title' },
@@ -39,6 +41,7 @@ export const scraperRules: GetMetadataOptions[] = [
       },
       { selector: 'meta[itemprop="description"]', attribute: 'content' },
       { selector: 'meta[name="description"]', attribute: 'content' },
+      { selector: 'yt-formatted-string#description-inline-expander' },
     ],
   },
   {
@@ -98,6 +101,8 @@ export const scraperRules: GetMetadataOptions[] = [
     name: 'date',
     multiple: false,
     selectors: [
+      { selector: 'meta[itemprop="datePublished"]', attribute: 'content' },
+      { selector: 'meta[itemprop="uploadDate"]', attribute: 'content' },
       { selector: 'meta[name="date" i]', attribute: 'content' },
       { selector: '[itemprop*="date" i]', attribute: 'content' },
       { selector: 'time[itemprop*="date" i]', attribute: 'datetime' },
@@ -145,6 +150,8 @@ export const scraperRules: GetMetadataOptions[] = [
       { selector: 'meta[property="og:video:url"]', attribute: 'content' },
       { selector: 'meta[name="og:video"]', attribute: 'content' },
       { selector: 'meta[property="og:video"]', attribute: 'content' },
+      { selector: 'meta[name="twitter:player"]', attribute: 'content' },
+      { selector: 'meta[property="twitter:player"]', attribute: 'content' },
     ],
   },
   {
@@ -153,6 +160,10 @@ export const scraperRules: GetMetadataOptions[] = [
     selectors: [
       {
         selector: 'meta[name="keywords"]',
+        attribute: 'content',
+      },
+      {
+        selector: 'meta[itemprop="keywords"]',
         attribute: 'content',
       },
     ],
