@@ -49,3 +49,8 @@ compatibility_date = "2023-08-21"
 # [[migrations]]
 # tag = "v1"
 # new_classes = ["MyDurableObject"]
+
+[observability]
+[observability.logs]
+enabled = false
+invocation_logs = true
