@@ -24,6 +24,12 @@ interface JSONObject {
 }
 
 export type ScrapeResponse = string | string[] | JSONObject
+type YouTubeOEmbed = {
+  title?: string
+  author_name?: string
+  thumbnail_url?: string
+  html?: string
+}
 
 const toStringValue = (value: ScrapeResponse | undefined): string => {
   return typeof value === 'string' ? value : ''
@@ -78,11 +84,60 @@ const buildYouTubeJsonLdFallback = (
   return jsonld
 }
 
+const getYouTubeEmbedUrl = (url: string): string => {
+  try {
+    const parsedUrl = new URL(url)
+    const hostname = parsedUrl.hostname.toLowerCase()
+    let videoId = ''
+
+    if (hostname === 'youtu.be') {
+      videoId = parsedUrl.pathname.replace(/^\/+/, '').split('/')[0] || ''
+    } else if (
+      hostname === 'youtube.com' ||
+      hostname === 'www.youtube.com' ||
+      hostname.endsWith('.youtube.com')
+    ) {
+      videoId =
+        parsedUrl.searchParams.get('v') ||
+        parsedUrl.pathname.replace(/^\/(shorts|embed)\//, '').split('/')[0] ||
+        ''
+    }
+
+    if (videoId) {
+      return `https://www.youtube.com/embed/${videoId}`
+    }
+  } catch {}
+
+  return ''
+}
+
+const getYouTubeOEmbed = async (url: string): Promise<YouTubeOEmbed | null> => {
+  try {
+    const oEmbedURL = new URL('https://www.youtube.com/oembed')
+    oEmbedURL.searchParams.set('url', url)
+    oEmbedURL.searchParams.set('format', 'json')
+
+    const response = await fetch(oEmbedURL.toString(), {
+      headers: {
+        accept: 'application/json',
+      },
+    })
+    if (!response.ok) return null
+
+    const parsed = (await response.json()) as YouTubeOEmbed
+    if (!parsed || typeof parsed !== 'object') return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
 async function handleRequest(request: Request) {
   const searchParams = new URL(request.url).searchParams
   const scraper = new Scraper()
   let response: Record<string, ScrapeResponse>
   let youtubePlayerDetails: Record<string, unknown> | null = null
+  let youtubeOEmbed: YouTubeOEmbed | null = null
   let url = searchParams.get('url')
   const cleanUrl = searchParams.get('cleanUrl')
 
@@ -110,6 +165,7 @@ async function handleRequest(request: Request) {
 
     if (isYouTubeUrl(scraper.response.url)) {
       youtubePlayerDetails = await scraper.getYouTubePlayerDetails()
+      youtubeOEmbed = await getYouTubeOEmbed(scraper.response.url)
     }
   } catch (error) {
     return generateErrorJSONResponse(error, url)
@@ -134,6 +190,31 @@ async function handleRequest(request: Request) {
     response.urlType = linkType(url, false)
 
     if (isYouTubeUrl(toStringValue(response.url))) {
+      if (youtubeOEmbed) {
+        if (typeof youtubeOEmbed.title === 'string' && youtubeOEmbed.title.trim()) {
+          response.title = youtubeOEmbed.title.trim()
+        }
+
+        if (
+          typeof youtubeOEmbed.author_name === 'string' &&
+          youtubeOEmbed.author_name.trim()
+        ) {
+          response.author = youtubeOEmbed.author_name.trim()
+        }
+
+        if (
+          typeof youtubeOEmbed.thumbnail_url === 'string' &&
+          youtubeOEmbed.thumbnail_url.trim()
+        ) {
+          response.image = youtubeOEmbed.thumbnail_url.trim()
+        }
+
+        const embedUrl = getYouTubeEmbedUrl(toStringValue(response.url))
+        if (embedUrl) {
+          response.video = embedUrl
+        }
+      }
+
       const fullDescription =
         youtubePlayerDetails &&
         typeof youtubePlayerDetails.shortDescription === 'string'
