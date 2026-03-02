@@ -25,10 +25,64 @@ interface JSONObject {
 
 export type ScrapeResponse = string | string[] | JSONObject
 
+const toStringValue = (value: ScrapeResponse | undefined): string => {
+  return typeof value === 'string' ? value : ''
+}
+
+const parseJsonLd = (value: ScrapeResponse | undefined): JSONValue | '' => {
+  if (typeof value !== 'string' || !value.trim()) return ''
+  try {
+    return JSON.parse(value)
+  } catch {
+    return ''
+  }
+}
+
+const isYouTubeUrl = (url: string): boolean => {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase()
+    return (
+      hostname === 'youtube.com' ||
+      hostname === 'www.youtube.com' ||
+      hostname.endsWith('.youtube.com') ||
+      hostname === 'youtu.be'
+    )
+  } catch {
+    return false
+  }
+}
+
+const buildYouTubeJsonLdFallback = (
+  response: Record<string, ScrapeResponse>
+): JSONObject => {
+  const jsonld: JSONObject = {
+    '@context': 'https://schema.org',
+    '@type': 'VideoObject',
+    name: toStringValue(response.title),
+    description: toStringValue(response.description),
+    thumbnailUrl: toStringValue(response.image),
+    uploadDate: toStringValue(response.date),
+    embedUrl: toStringValue(response.video),
+    url: toStringValue(response.url),
+    keywords: toStringValue(response.keywords),
+  }
+
+  const author = toStringValue(response.author)
+  if (author) {
+    jsonld.author = {
+      '@type': 'Person',
+      name: author,
+    }
+  }
+
+  return jsonld
+}
+
 async function handleRequest(request: Request) {
   const searchParams = new URL(request.url).searchParams
   const scraper = new Scraper()
   let response: Record<string, ScrapeResponse>
+  let youtubePlayerDetails: Record<string, unknown> | null = null
   let url = searchParams.get('url')
   const cleanUrl = searchParams.get('cleanUrl')
 
@@ -53,6 +107,10 @@ async function handleRequest(request: Request) {
     }
 
     await scraper.fetch(url)
+
+    if (isYouTubeUrl(scraper.response.url)) {
+      youtubePlayerDetails = await scraper.getYouTubePlayerDetails()
+    }
   } catch (error) {
     return generateErrorJSONResponse(error, url)
   }
@@ -75,9 +133,32 @@ async function handleRequest(request: Request) {
     // Add url type
     response.urlType = linkType(url, false)
 
-    // Parse JSON-LD
-    if (response?.jsonld) {
-      response.jsonld = JSON.parse(response.jsonld as string)
+    if (isYouTubeUrl(toStringValue(response.url))) {
+      const fullDescription =
+        youtubePlayerDetails &&
+        typeof youtubePlayerDetails.shortDescription === 'string'
+          ? youtubePlayerDetails.shortDescription.trim()
+          : ''
+
+      const channelName =
+        youtubePlayerDetails && typeof youtubePlayerDetails.author === 'string'
+          ? youtubePlayerDetails.author.trim()
+          : ''
+
+      if (fullDescription) {
+        response.description = fullDescription
+      }
+
+      if (channelName && !toStringValue(response.author)) {
+        response.author = channelName
+      }
+    }
+
+    // Parse JSON-LD if present, otherwise build a YouTube fallback.
+    response.jsonld = parseJsonLd(response?.jsonld)
+
+    if (!response.jsonld && isYouTubeUrl(toStringValue(response.url))) {
+      response.jsonld = buildYouTubeJsonLdFallback(response)
     }
   } catch (error) {
     return generateErrorJSONResponse(error, url)

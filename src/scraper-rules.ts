@@ -48,6 +48,14 @@ export const scraperRules: GetMetadataOptions[] = [
     name: 'author',
     multiple: false,
     selectors: [
+      {
+        selector: 'span[itemprop="author"] link[itemprop="name"]',
+        attribute: 'content',
+      },
+      {
+        selector: '[itemprop="author"] [itemprop="name"]',
+        attribute: 'content',
+      },
       { selector: 'link[rel=author]', attribute: 'href' },
       { selector: 'meta[name="author"]', attribute: 'content' },
       { selector: 'meta[name="article:author"]', attribute: 'content' },

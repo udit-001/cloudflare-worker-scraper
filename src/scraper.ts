@@ -17,11 +17,13 @@ class Scraper {
   rewriter: HTMLRewriter
   url: string
   response: Response
+  responseText: string | null
   metadata: ScrapeResponse
   unshortenedInfo: FollowShortUrlResponse
 
   constructor() {
     this.rewriter = new HTMLRewriter()
+    this.responseText = null
     return this
   }
 
@@ -133,6 +135,75 @@ class Scraper {
     await transformed.arrayBuffer()
 
     return matches
+  }
+
+  private async getResponseText(): Promise<string> {
+    if (this.responseText !== null) {
+      return this.responseText
+    }
+    this.responseText = await this.response.clone().text()
+    return this.responseText
+  }
+
+  private extractJsonObjectFromScript(source: string): string | null {
+    const marker = 'var ytInitialPlayerResponse ='
+    const markerIndex = source.indexOf(marker)
+    if (markerIndex === -1) return null
+
+    const start = source.indexOf('{', markerIndex + marker.length)
+    if (start === -1) return null
+
+    let i = start
+    let depth = 0
+    let inString = false
+    let quote = ''
+    let escaped = false
+
+    while (i < source.length) {
+      const ch = source[i]
+
+      if (inString) {
+        if (escaped) {
+          escaped = false
+        } else if (ch === '\\') {
+          escaped = true
+        } else if (ch === quote) {
+          inString = false
+          quote = ''
+        }
+      } else {
+        if (ch === '"' || ch === "'") {
+          inString = true
+          quote = ch
+        } else if (ch === '{') {
+          depth++
+        } else if (ch === '}') {
+          depth--
+          if (depth === 0) {
+            return source.slice(start, i + 1)
+          }
+        }
+      }
+      i++
+    }
+
+    return null
+  }
+
+  async getYouTubePlayerDetails(): Promise<Record<string, unknown> | null> {
+    const html = await this.getResponseText()
+    const json = this.extractJsonObjectFromScript(html)
+    if (!json) return null
+
+    try {
+      const parsed = JSON.parse(json) as { videoDetails?: Record<string, unknown> }
+      if (!parsed.videoDetails || typeof parsed.videoDetails !== 'object') {
+        return null
+      }
+      return parsed.videoDetails
+    } catch {
+      return null
+    }
   }
 }
 
