@@ -30,6 +30,12 @@ type YouTubeOEmbed = {
   thumbnail_url?: string
   html?: string
 }
+type TwitterOEmbed = {
+  author_name?: string
+  author_url?: string
+  html?: string
+  url?: string
+}
 
 const toStringValue = (value: ScrapeResponse | undefined): string => {
   return typeof value === 'string' ? value : ''
@@ -44,14 +50,37 @@ const parseJsonLd = (value: ScrapeResponse | undefined): JSONValue | '' => {
   }
 }
 
+const getHostname = (url: string): string => {
+  try {
+    return new URL(url).hostname.toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+const isYouTubeHost = (hostname: string): boolean => {
+  return (
+    hostname === 'youtu.be' ||
+    hostname === 'youtube.com' ||
+    hostname === 'www.youtube.com' ||
+    hostname.endsWith('.youtube.com')
+  )
+}
+
 const isYouTubeUrl = (url: string): boolean => {
+  return isYouTubeHost(getHostname(url))
+}
+
+const isTwitterUrl = (url: string): boolean => {
   try {
     const hostname = new URL(url).hostname.toLowerCase()
     return (
-      hostname === 'youtube.com' ||
-      hostname === 'www.youtube.com' ||
-      hostname.endsWith('.youtube.com') ||
-      hostname === 'youtu.be'
+      hostname === 'x.com' ||
+      hostname === 'www.x.com' ||
+      hostname.endsWith('.x.com') ||
+      hostname === 'twitter.com' ||
+      hostname === 'www.twitter.com' ||
+      hostname.endsWith('.twitter.com')
     )
   } catch {
     return false
@@ -84,37 +113,47 @@ const buildYouTubeJsonLdFallback = (
   return jsonld
 }
 
-const getYouTubeEmbedUrl = (url: string): string => {
+const getYouTubeVideoId = (url: string): string => {
   try {
     const parsedUrl = new URL(url)
     const hostname = parsedUrl.hostname.toLowerCase()
-    let videoId = ''
+
+    if (!isYouTubeHost(hostname)) return ''
 
     if (hostname === 'youtu.be') {
-      videoId = parsedUrl.pathname.replace(/^\/+/, '').split('/')[0] || ''
-    } else if (
-      hostname === 'youtube.com' ||
-      hostname === 'www.youtube.com' ||
-      hostname.endsWith('.youtube.com')
-    ) {
-      videoId =
-        parsedUrl.searchParams.get('v') ||
-        parsedUrl.pathname.replace(/^\/(shorts|embed)\//, '').split('/')[0] ||
-        ''
+      return parsedUrl.pathname.replace(/^\/+/, '').split('/')[0] || ''
     }
 
-    if (videoId) {
-      return `https://www.youtube.com/embed/${videoId}`
+    const vParam = parsedUrl.searchParams.get('v')
+    if (vParam) return vParam
+
+    const path = parsedUrl.pathname
+    if (path.startsWith('/shorts/')) {
+      return path.replace('/shorts/', '').split('/')[0] || ''
+    }
+    if (path.startsWith('/embed/')) {
+      return path.replace('/embed/', '').split('/')[0] || ''
     }
   } catch {}
 
   return ''
 }
 
+const getYouTubeEmbedUrl = (url: string): string => {
+  const videoId = getYouTubeVideoId(url)
+  return videoId ? `https://www.youtube.com/embed/${videoId}` : ''
+}
+
+const normalizeYouTubeOEmbedUrl = (url: string): string => {
+  const videoId = getYouTubeVideoId(url)
+  if (!videoId) return url
+  return `https://www.youtube.com/watch?v=${videoId}`
+}
+
 const getYouTubeOEmbed = async (url: string): Promise<YouTubeOEmbed | null> => {
   try {
     const oEmbedURL = new URL('https://www.youtube.com/oembed')
-    oEmbedURL.searchParams.set('url', url)
+    oEmbedURL.searchParams.set('url', normalizeYouTubeOEmbedUrl(url))
     oEmbedURL.searchParams.set('format', 'json')
 
     const response = await fetch(oEmbedURL.toString(), {
@@ -132,12 +171,68 @@ const getYouTubeOEmbed = async (url: string): Promise<YouTubeOEmbed | null> => {
   }
 }
 
+const normalizeTwitterOEmbedUrl = (url: string): string => {
+  try {
+    const parsed = new URL(url)
+    if (parsed.hostname.toLowerCase().includes('x.com')) {
+      parsed.hostname = 'twitter.com'
+    }
+    return parsed.toString()
+  } catch {
+    return url
+  }
+}
+
+const stripHtmlTags = (value: string): string => {
+  return value
+    .replace(/<blockquote[^>]*>/gi, '')
+    .replace(/<\/blockquote>/gi, '')
+    .replace(/<a[^>]*>/gi, '')
+    .replace(/<\/a>/gi, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&mdash;/g, '-')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .trim()
+}
+
+const getTwitterOEmbed = async (url: string): Promise<TwitterOEmbed | null> => {
+  const base = 'https://publish.twitter.com/oembed'
+  const candidates = [url, normalizeTwitterOEmbedUrl(url)]
+
+  for (const candidate of candidates) {
+    try {
+      const oEmbedURL = new URL(base)
+      oEmbedURL.searchParams.set('url', candidate)
+      oEmbedURL.searchParams.set('omit_script', 'true')
+      oEmbedURL.searchParams.set('dnt', 'true')
+
+      const response = await fetch(oEmbedURL.toString(), {
+        headers: {
+          accept: 'application/json',
+        },
+      })
+      if (!response.ok) continue
+
+      const parsed = (await response.json()) as TwitterOEmbed
+      if (!parsed || typeof parsed !== 'object') continue
+      return parsed
+    } catch {
+      // continue to next candidate
+    }
+  }
+
+  return null
+}
+
 async function handleRequest(request: Request) {
   const searchParams = new URL(request.url).searchParams
   const scraper = new Scraper()
   let response: Record<string, ScrapeResponse>
   let youtubePlayerDetails: Record<string, unknown> | null = null
   let youtubeOEmbed: YouTubeOEmbed | null = null
+  let twitterOEmbed: TwitterOEmbed | null = null
   let url = searchParams.get('url')
   const cleanUrl = searchParams.get('cleanUrl')
 
@@ -166,6 +261,10 @@ async function handleRequest(request: Request) {
     if (isYouTubeUrl(scraper.response.url)) {
       youtubePlayerDetails = await scraper.getYouTubePlayerDetails()
       youtubeOEmbed = await getYouTubeOEmbed(scraper.response.url)
+    }
+
+    if (isTwitterUrl(scraper.response.url)) {
+      twitterOEmbed = await getTwitterOEmbed(scraper.response.url)
     }
   } catch (error) {
     return generateErrorJSONResponse(error, url)
@@ -232,6 +331,29 @@ async function handleRequest(request: Request) {
 
       if (channelName && !toStringValue(response.author)) {
         response.author = channelName
+      }
+    }
+
+    if (isTwitterUrl(toStringValue(response.url)) && twitterOEmbed) {
+      if (
+        typeof twitterOEmbed.author_name === 'string' &&
+        twitterOEmbed.author_name.trim()
+      ) {
+        response.author = twitterOEmbed.author_name.trim()
+      }
+
+      if (typeof twitterOEmbed.url === 'string' && twitterOEmbed.url.trim()) {
+        response.url = twitterOEmbed.url.trim()
+      }
+
+      if (
+        typeof twitterOEmbed.html === 'string' &&
+        twitterOEmbed.html.trim()
+      ) {
+        const plainText = stripHtmlTags(twitterOEmbed.html)
+        if (plainText) {
+          response.description = plainText
+        }
       }
     }
 
