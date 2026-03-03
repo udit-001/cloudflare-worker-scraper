@@ -87,6 +87,37 @@ const isTwitterUrl = (url: string): boolean => {
   }
 }
 
+const isInstagramUrl = (url: string): boolean => {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase()
+    return (
+      hostname === 'instagram.com' ||
+      hostname === 'www.instagram.com' ||
+      hostname.endsWith('.instagram.com')
+    )
+  } catch {
+    return false
+  }
+}
+
+const toVxInstagramUrl = (url: string): string => {
+  try {
+    const parsed = new URL(url)
+    const hostname = parsed.hostname.toLowerCase()
+    if (
+      hostname === 'instagram.com' ||
+      hostname === 'www.instagram.com' ||
+      hostname.endsWith('.instagram.com')
+    ) {
+      parsed.hostname = 'vxinstagram.com'
+      return parsed.toString()
+    }
+  } catch {
+    // Return original URL when parsing fails.
+  }
+  return url
+}
+
 const buildYouTubeJsonLdFallback = (
   response: Record<string, ScrapeResponse>
 ): JSONObject => {
@@ -254,6 +285,11 @@ async function handleRequest(request: Request) {
     if (url.includes('reddit.com')) {
       requestedUrl.hostname = 'old.reddit.com'
       url = requestedUrl.toString()
+    }
+
+    // Use vxinstagram for instagram URLs to get stable, bot-friendly OpenGraph data.
+    if (isInstagramUrl(url)) {
+      url = toVxInstagramUrl(url)
     }
 
     await scraper.fetch(url)
