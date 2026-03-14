@@ -8,7 +8,7 @@ import { TidyURL } from 'tidy-url'
 import { scraperRules } from './scraper-rules'
 
 addEventListener('fetch', (event: FetchEvent) => {
-  event.respondWith(handleRequest(event.request))
+  event.respondWith(handleRequest(event.request, event))
 })
 
 type JSONValue =
@@ -37,6 +37,9 @@ type TwitterOEmbed = {
   url?: string
 }
 
+const CACHE_TTL_SECONDS = 3600
+const STALE_WHILE_REVALIDATE_SECONDS = 86400
+
 const toStringValue = (value: ScrapeResponse | undefined): string => {
   return typeof value === 'string' ? value : ''
 }
@@ -48,6 +51,43 @@ const parseJsonLd = (value: ScrapeResponse | undefined): JSONValue | '' => {
   } catch {
     return ''
   }
+}
+
+const getYouTubeSchemaDescription = (jsonld: JSONValue | ''): string => {
+  if (!jsonld || typeof jsonld !== 'object') return ''
+
+  const findVideoDescription = (node: JSONValue): string => {
+    if (!node || typeof node !== 'object') return ''
+
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const description = findVideoDescription(item)
+        if (description) return description
+      }
+      return ''
+    }
+
+    const typeValue = node['@type']
+    const isVideoObject =
+      typeof typeValue === 'string'
+        ? typeValue === 'VideoObject'
+        : Array.isArray(typeValue) &&
+          typeValue.some((entry) => entry === 'VideoObject')
+
+    if (isVideoObject && typeof node.description === 'string') {
+      const description = node.description.trim()
+      if (description) return description
+    }
+
+    for (const value of Object.values(node)) {
+      const description = findVideoDescription(value)
+      if (description) return description
+    }
+
+    return ''
+  }
+
+  return findVideoDescription(jsonld)
 }
 
 const getHostname = (url: string): string => {
@@ -257,8 +297,24 @@ const getTwitterOEmbed = async (url: string): Promise<TwitterOEmbed | null> => {
   return null
 }
 
-async function handleRequest(request: Request) {
+async function handleRequest(request: Request, event?: FetchEvent) {
   const searchParams = new URL(request.url).searchParams
+  const shouldBypassCache =
+    searchParams.get('cache') === '0' || searchParams.get('refresh') === '1'
+  const cacheUrl = new URL(request.url)
+  cacheUrl.searchParams.delete('cache')
+  cacheUrl.searchParams.delete('refresh')
+  const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' })
+
+  if (request.method === 'GET' && !shouldBypassCache) {
+    const cached = await caches.default.match(cacheKey)
+    if (cached) {
+      const cachedResponse = new Response(cached.body, cached)
+      cachedResponse.headers.set('x-worker-cache', 'HIT')
+      return cachedResponse
+    }
+  }
+
   const scraper = new Scraper()
   let response: Record<string, ScrapeResponse>
   let youtubePlayerDetails: Record<string, unknown> | null = null
@@ -309,6 +365,7 @@ async function handleRequest(request: Request) {
   try {
     // Get metadata using the rules defined in `src/scraper-rules.ts`
     response = await scraper.getMetadata(scraperRules)
+    const parsedJsonLd = parseJsonLd(response?.jsonld)
 
     const unshortenedUrl = scraper.response.url
 
@@ -326,11 +383,16 @@ async function handleRequest(request: Request) {
 
     if (isYouTubeUrl(toStringValue(response.url))) {
       if (youtubeOEmbed) {
-        if (typeof youtubeOEmbed.title === 'string' && youtubeOEmbed.title.trim()) {
+        if (
+          !toStringValue(response.title) &&
+          typeof youtubeOEmbed.title === 'string' &&
+          youtubeOEmbed.title.trim()
+        ) {
           response.title = youtubeOEmbed.title.trim()
         }
 
         if (
+          !toStringValue(response.author) &&
           typeof youtubeOEmbed.author_name === 'string' &&
           youtubeOEmbed.author_name.trim()
         ) {
@@ -338,6 +400,7 @@ async function handleRequest(request: Request) {
         }
 
         if (
+          !toStringValue(response.image) &&
           typeof youtubeOEmbed.thumbnail_url === 'string' &&
           youtubeOEmbed.thumbnail_url.trim()
         ) {
@@ -345,16 +408,20 @@ async function handleRequest(request: Request) {
         }
 
         const embedUrl = getYouTubeEmbedUrl(toStringValue(response.url))
-        if (embedUrl) {
+        if (embedUrl && !toStringValue(response.video)) {
           response.video = embedUrl
         }
       }
 
-      const fullDescription =
+      const schemaDescription = getYouTubeSchemaDescription(parsedJsonLd)
+      const shortDescription =
         youtubePlayerDetails &&
         typeof youtubePlayerDetails.shortDescription === 'string'
           ? youtubePlayerDetails.shortDescription.trim()
           : ''
+      const metadataDescription = toStringValue(response.description).trim()
+      const fullDescription =
+        schemaDescription || shortDescription || metadataDescription
 
       const channelName =
         youtubePlayerDetails && typeof youtubePlayerDetails.author === 'string'
@@ -394,7 +461,7 @@ async function handleRequest(request: Request) {
     }
 
     // Parse JSON-LD if present, otherwise build a YouTube fallback.
-    response.jsonld = parseJsonLd(response?.jsonld)
+    response.jsonld = parsedJsonLd
 
     if (!response.jsonld && isYouTubeUrl(toStringValue(response.url))) {
       response.jsonld = buildYouTubeJsonLdFallback(response)
@@ -403,5 +470,20 @@ async function handleRequest(request: Request) {
     return generateErrorJSONResponse(error, url)
   }
 
-  return generateJSONResponse(response)
+  const finalResponse = generateJSONResponse(response)
+  finalResponse.headers.set(
+    'Cache-Control',
+    `public, s-maxage=${CACHE_TTL_SECONDS}, stale-while-revalidate=${STALE_WHILE_REVALIDATE_SECONDS}`
+  )
+  finalResponse.headers.set(
+    'CDN-Cache-Control',
+    `public, s-maxage=${CACHE_TTL_SECONDS}, stale-while-revalidate=${STALE_WHILE_REVALIDATE_SECONDS}`
+  )
+  finalResponse.headers.set('x-worker-cache', shouldBypassCache ? 'BYPASS' : 'MISS')
+
+  if (request.method === 'GET' && !shouldBypassCache && event) {
+    event.waitUntil(caches.default.put(cacheKey, finalResponse.clone()))
+  }
+
+  return finalResponse
 }
