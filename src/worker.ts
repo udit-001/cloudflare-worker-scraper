@@ -30,11 +30,53 @@ type YouTubeOEmbed = {
   thumbnail_url?: string
   html?: string
 }
-type TwitterOEmbed = {
-  author_name?: string
-  author_url?: string
-  html?: string
+type FxTwitterPhoto = {
   url?: string
+  width?: number
+  height?: number
+  type?: string
+}
+
+type FxTwitterVideo = {
+  url?: string
+  thumbnail_url?: string
+  width?: number
+  height?: number
+  duration?: number
+  format?: string
+  type?: string
+}
+
+type FxTwitterExternalMedia = {
+  url?: string
+  width?: number
+  height?: number
+  duration?: number
+  type?: string
+}
+
+type FxTwitterAuthor = {
+  name?: string
+  screen_name?: string
+  avatar_url?: string
+  banner_url?: string
+}
+
+type FxTwitterTweet = {
+  url?: string
+  text?: string
+  author?: FxTwitterAuthor
+  media?: {
+    photos?: FxTwitterPhoto[]
+    videos?: FxTwitterVideo[]
+    external?: FxTwitterExternalMedia
+  }
+}
+
+type FxTwitterStatusResponse = {
+  code?: number
+  message?: string
+  tweet?: FxTwitterTweet
 }
 
 const CACHE_TTL_SECONDS = 3600
@@ -44,10 +86,14 @@ const toStringValue = (value: ScrapeResponse | undefined): string => {
   return typeof value === 'string' ? value : ''
 }
 
-const parseJsonLd = (value: ScrapeResponse | undefined): JSONValue | '' => {
+const parseJsonLd = (value: ScrapeResponse | undefined): JSONObject | '' => {
   if (typeof value !== 'string' || !value.trim()) return ''
   try {
-    return JSON.parse(value)
+    const parsed = JSON.parse(value)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as JSONObject
+    }
+    return ''
   } catch {
     return ''
   }
@@ -242,7 +288,7 @@ const getYouTubeOEmbed = async (url: string): Promise<YouTubeOEmbed | null> => {
   }
 }
 
-const normalizeTwitterOEmbedUrl = (url: string): string => {
+const normalizeTwitterStatusUrl = (url: string): string => {
   try {
     const parsed = new URL(url)
     if (parsed.hostname.toLowerCase().includes('x.com')) {
@@ -254,40 +300,46 @@ const normalizeTwitterOEmbedUrl = (url: string): string => {
   }
 }
 
-const stripHtmlTags = (value: string): string => {
-  return value
-    .replace(/<blockquote[^>]*>/gi, '')
-    .replace(/<\/blockquote>/gi, '')
-    .replace(/<a[^>]*>/gi, '')
-    .replace(/<\/a>/gi, '')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&mdash;/g, '-')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .trim()
+const getTwitterStatusId = (url: string): string => {
+  try {
+    const parsed = new URL(normalizeTwitterStatusUrl(url))
+    const parts = parsed.pathname.split('/').filter(Boolean)
+    const statusIndex = parts.findIndex((part) => part === 'status')
+    if (statusIndex === -1) return ''
+    return parts[statusIndex + 1] || ''
+  } catch {
+    return ''
+  }
 }
 
-const getTwitterOEmbed = async (url: string): Promise<TwitterOEmbed | null> => {
-  const base = 'https://publish.twitter.com/oembed'
-  const candidates = [url, normalizeTwitterOEmbedUrl(url)]
+const getFxTwitterStatus = async (
+  url: string
+): Promise<FxTwitterStatusResponse | null> => {
+  const statusId = getTwitterStatusId(url)
+  if (!statusId) return null
+
+  const candidates = [url, normalizeTwitterStatusUrl(url)]
 
   for (const candidate of candidates) {
     try {
-      const oEmbedURL = new URL(base)
-      oEmbedURL.searchParams.set('url', candidate)
-      oEmbedURL.searchParams.set('omit_script', 'true')
-      oEmbedURL.searchParams.set('dnt', 'true')
+      const parsedCandidate = new URL(candidate)
+      const pathParts = parsedCandidate.pathname.split('/').filter(Boolean)
+      const screenName = pathParts[0] || 'i'
+      const apiUrl = new URL(
+        `https://api.fxtwitter.com/${encodeURIComponent(screenName)}/status/${encodeURIComponent(statusId)}`
+      )
 
-      const response = await fetch(oEmbedURL.toString(), {
+      const response = await fetch(apiUrl.toString(), {
         headers: {
           accept: 'application/json',
         },
       })
       if (!response.ok) continue
 
-      const parsed = (await response.json()) as TwitterOEmbed
+      const parsed = (await response.json()) as FxTwitterStatusResponse
       if (!parsed || typeof parsed !== 'object') continue
+      if (parsed.code && parsed.code !== 200) continue
+      if (!parsed.tweet || typeof parsed.tweet !== 'object') continue
       return parsed
     } catch {
       // continue to next candidate
@@ -319,7 +371,7 @@ async function handleRequest(request: Request, event?: FetchEvent) {
   let response: Record<string, ScrapeResponse>
   let youtubePlayerDetails: Record<string, unknown> | null = null
   let youtubeOEmbed: YouTubeOEmbed | null = null
-  let twitterOEmbed: TwitterOEmbed | null = null
+  let fxTwitterStatus: FxTwitterStatusResponse | null = null
   let url = searchParams.get('url')
   const cleanUrl = searchParams.get('cleanUrl')
 
@@ -356,7 +408,7 @@ async function handleRequest(request: Request, event?: FetchEvent) {
     }
 
     if (isTwitterUrl(scraper.response.url)) {
-      twitterOEmbed = await getTwitterOEmbed(scraper.response.url)
+      fxTwitterStatus = await getFxTwitterStatus(scraper.response.url)
     }
   } catch (error) {
     return generateErrorJSONResponse(error, url)
@@ -437,25 +489,54 @@ async function handleRequest(request: Request, event?: FetchEvent) {
       }
     }
 
-    if (isTwitterUrl(toStringValue(response.url)) && twitterOEmbed) {
-      if (
-        typeof twitterOEmbed.author_name === 'string' &&
-        twitterOEmbed.author_name.trim()
-      ) {
-        response.author = twitterOEmbed.author_name.trim()
+    if (isTwitterUrl(toStringValue(response.url)) && fxTwitterStatus?.tweet) {
+      const tweet = fxTwitterStatus.tweet
+      const tweetAuthor = tweet.author
+      const tweetText = typeof tweet.text === 'string' ? tweet.text.trim() : ''
+      const tweetUrl = typeof tweet.url === 'string' ? tweet.url.trim() : ''
+      const photo = Array.isArray(tweet.media?.photos)
+        ? tweet.media?.photos.find(
+            (item) => typeof item?.url === 'string' && item.url.trim()
+          )
+        : undefined
+      const video = Array.isArray(tweet.media?.videos)
+        ? tweet.media?.videos.find(
+            (item) => typeof item?.url === 'string' && item.url.trim()
+          )
+        : undefined
+      const external = tweet.media?.external
+
+      if (typeof tweetAuthor?.name === 'string' && tweetAuthor.name.trim()) {
+        response.author = tweetAuthor.name.trim()
       }
 
-      if (typeof twitterOEmbed.url === 'string' && twitterOEmbed.url.trim()) {
-        response.url = twitterOEmbed.url.trim()
+      if (tweetUrl) {
+        response.url = tweetUrl
       }
 
-      if (
-        typeof twitterOEmbed.html === 'string' &&
-        twitterOEmbed.html.trim()
-      ) {
-        const plainText = stripHtmlTags(twitterOEmbed.html)
-        if (plainText) {
-          response.description = plainText
+      if (tweetText) {
+        response.description = tweetText
+      }
+
+      if (!toStringValue(response.title) && tweetText) {
+        response.title = tweetText.slice(0, 100)
+      }
+
+      if (!toStringValue(response.image)) {
+        if (photo?.url) {
+          response.image = photo.url.trim()
+        } else if (video?.thumbnail_url) {
+          response.image = video.thumbnail_url.trim()
+        } else if (tweetAuthor?.avatar_url) {
+          response.image = tweetAuthor.avatar_url.trim()
+        }
+      }
+
+      if (!toStringValue(response.video)) {
+        if (video?.url) {
+          response.video = video.url.trim()
+        } else if (typeof external?.url === 'string' && external.url.trim()) {
+          response.video = external.url.trim()
         }
       }
     }
