@@ -146,6 +146,12 @@ const getHostname = (url: string): string => {
   }
 }
 
+const getSiteLogoUrl = (url: string): string => {
+  const hostname = getHostname(url)
+  if (!hostname) return ''
+  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(hostname)}&sz=32`
+}
+
 const isYouTubeHost = (hostname: string): boolean => {
   return (
     hostname === 'youtu.be' ||
@@ -418,7 +424,7 @@ async function handleRequest(request: Request, event?: FetchEvent) {
         feeds: [],
         date: typeof tweet.created_at === 'string' ? tweet.created_at : '',
         lang: typeof tweet.lang === 'string' ? tweet.lang : 'en',
-        logo: '',
+        logo: getSiteLogoUrl(tweetUrl || url),
         keywords: '',
         jsonld: '',
         url: tweetUrl || url,
@@ -556,6 +562,9 @@ async function handleRequest(request: Request, event?: FetchEvent) {
     if (!response.jsonld && isYouTubeUrl(toStringValue(response.url))) {
       response.jsonld = buildYouTubeJsonLdFallback(response)
     }
+
+    // Add site logo using Google's favicon service
+    response.logo = getSiteLogoUrl(toStringValue(response.url) || url)
   } catch (error) {
     return generateErrorJSONResponse(error, url)
   }
