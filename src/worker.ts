@@ -65,6 +65,8 @@ type FxTwitterAuthor = {
 type FxTwitterTweet = {
   url?: string
   text?: string
+  created_at?: string
+  lang?: string
   author?: FxTwitterAuthor
   media?: {
     photos?: FxTwitterPhoto[]
@@ -332,6 +334,7 @@ const getFxTwitterStatus = async (
       const response = await fetch(apiUrl.toString(), {
         headers: {
           accept: 'application/json',
+          'user-agent': 'Mozilla/5.0 (compatible; MetaScraper/1.0)',
         },
       })
       if (!response.ok) continue
@@ -385,6 +388,68 @@ async function handleRequest(request: Request, event?: FetchEvent) {
     url = 'https://' + url
   }
 
+  // For Twitter/X URLs, skip scraping and use FxTwitter API directly
+  // since x.com blocks bot requests
+  if (isTwitterUrl(url)) {
+    fxTwitterStatus = await getFxTwitterStatus(url)
+    if (fxTwitterStatus?.tweet) {
+      const tweet = fxTwitterStatus.tweet
+      const tweetAuthor = tweet.author
+      const tweetText = typeof tweet.text === 'string' ? tweet.text.trim() : ''
+      const tweetUrl = typeof tweet.url === 'string' ? tweet.url.trim() : ''
+      const photo = Array.isArray(tweet.media?.photos)
+        ? tweet.media?.photos.find(
+            (item) => typeof item?.url === 'string' && item.url.trim()
+          )
+        : undefined
+      const video = Array.isArray(tweet.media?.videos)
+        ? tweet.media?.videos.find(
+            (item) => typeof item?.url === 'string' && item.url.trim()
+          )
+        : undefined
+      const external = tweet.media?.external
+
+      response = {
+        title: tweetText ? tweetText.slice(0, 100) : '',
+        description: tweetText,
+        author: typeof tweetAuthor?.name === 'string' ? tweetAuthor.name.trim() : '',
+        image: photo?.url?.trim() || video?.thumbnail_url?.trim() || tweetAuthor?.avatar_url?.trim() || '',
+        video: video?.url?.trim() || (typeof external?.url === 'string' ? external.url.trim() : ''),
+        feeds: [],
+        date: typeof tweet.created_at === 'string' ? tweet.created_at : '',
+        lang: typeof tweet.lang === 'string' ? tweet.lang : 'en',
+        logo: '',
+        keywords: '',
+        jsonld: '',
+        url: tweetUrl || url,
+        urlType: 'link',
+      }
+
+      // Add cleaned url
+      if (cleanUrl) {
+        const cleanedUrl = TidyURL.clean(url)
+        response.cleaned_url = cleanedUrl.url
+      }
+
+      const finalResponse = generateJSONResponse(response)
+      finalResponse.headers.set(
+        'Cache-Control',
+        `public, s-maxage=${CACHE_TTL_SECONDS}, stale-while-revalidate=${STALE_WHILE_REVALIDATE_SECONDS}`
+      )
+      finalResponse.headers.set(
+        'CDN-Cache-Control',
+        `public, s-maxage=${CACHE_TTL_SECONDS}, stale-while-revalidate=${STALE_WHILE_REVALIDATE_SECONDS}`
+      )
+      finalResponse.headers.set('x-worker-cache', shouldBypassCache ? 'BYPASS' : 'MISS')
+
+      if (request.method === 'GET' && !shouldBypassCache && event) {
+        event.waitUntil(caches.default.put(cacheKey, finalResponse.clone()))
+      }
+
+      return finalResponse
+    }
+  }
+
   try {
     const requestedUrl = new URL(url)
 
@@ -405,10 +470,6 @@ async function handleRequest(request: Request, event?: FetchEvent) {
     if (isYouTubeUrl(scraper.response.url)) {
       youtubePlayerDetails = await scraper.getYouTubePlayerDetails()
       youtubeOEmbed = await getYouTubeOEmbed(scraper.response.url)
-    }
-
-    if (isTwitterUrl(scraper.response.url)) {
-      fxTwitterStatus = await getFxTwitterStatus(scraper.response.url)
     }
   } catch (error) {
     return generateErrorJSONResponse(error, url)
@@ -486,58 +547,6 @@ async function handleRequest(request: Request, event?: FetchEvent) {
 
       if (channelName && !toStringValue(response.author)) {
         response.author = channelName
-      }
-    }
-
-    if (isTwitterUrl(toStringValue(response.url)) && fxTwitterStatus?.tweet) {
-      const tweet = fxTwitterStatus.tweet
-      const tweetAuthor = tweet.author
-      const tweetText = typeof tweet.text === 'string' ? tweet.text.trim() : ''
-      const tweetUrl = typeof tweet.url === 'string' ? tweet.url.trim() : ''
-      const photo = Array.isArray(tweet.media?.photos)
-        ? tweet.media?.photos.find(
-            (item) => typeof item?.url === 'string' && item.url.trim()
-          )
-        : undefined
-      const video = Array.isArray(tweet.media?.videos)
-        ? tweet.media?.videos.find(
-            (item) => typeof item?.url === 'string' && item.url.trim()
-          )
-        : undefined
-      const external = tweet.media?.external
-
-      if (typeof tweetAuthor?.name === 'string' && tweetAuthor.name.trim()) {
-        response.author = tweetAuthor.name.trim()
-      }
-
-      if (tweetUrl) {
-        response.url = tweetUrl
-      }
-
-      if (tweetText) {
-        response.description = tweetText
-      }
-
-      if (!toStringValue(response.title) && tweetText) {
-        response.title = tweetText.slice(0, 100)
-      }
-
-      if (!toStringValue(response.image)) {
-        if (photo?.url) {
-          response.image = photo.url.trim()
-        } else if (video?.thumbnail_url) {
-          response.image = video.thumbnail_url.trim()
-        } else if (tweetAuthor?.avatar_url) {
-          response.image = tweetAuthor.avatar_url.trim()
-        }
-      }
-
-      if (!toStringValue(response.video)) {
-        if (video?.url) {
-          response.video = video.url.trim()
-        } else if (typeof external?.url === 'string' && external.url.trim()) {
-          response.video = external.url.trim()
-        }
       }
     }
 
